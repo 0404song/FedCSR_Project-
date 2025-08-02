@@ -1,0 +1,20 @@
+# PyCharm/IDE specific files
+.idea/
+
+# Python cache and environment files
+__pycache__/
+*.pyc
+env/
+venv/
+.env
+
+# Large data files
+dataset/
+*.zip
+*.gz
+*.csv
+*.dat
+
+# Log files
+logs/
+
