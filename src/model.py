@@ -1,9 +1,11 @@
+# -*- coding: utf-8 -*-
+
 # src/model.py
 import torch
 import torch.nn as nn
 
 class MatrixFactorization(nn.Module):
-    def __init__(self, num_users, num_items, embedding_dim=32): # <--- Ìí¼Ó embedding_dim
+    def __init__(self, num_users, num_items, embedding_dim=32): # <--- ÃŒÃ­Â¼Ã“ embedding_dim
         super(MatrixFactorization, self).__init__()
         self.user_embeddings = nn.Embedding(num_users, embedding_dim)
         self.item_embeddings = nn.Embedding(num_items, embedding_dim)

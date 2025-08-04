@@ -18,3 +18,6 @@ dataset/
 # Log files
 logs/
 
+
+# Editor swap files
+*.swp
