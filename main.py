@@ -1,83 +1,152 @@
-# -*- coding: utf-8 -*-
-
-# main.py (重构版)
-
-import torch
+# main.py (Final, Self-Contained Version for "Decisive Battle")
 import os
+import sys
+import copy
+import json
 import time
+import logging
+import torch
+import numpy as np
+from datetime import datetime
 
-# 将src目录添加到系统路径，以便导入模块
-# import sys
-# sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
+# 将项目根目录添加到Python路径中，以便正确导入模块
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__))))
 
 from config import CONFIG
-from src.data_loader import load_and_preprocess_movielens, create_federated_data # 修改点
-from src.server import Server 
+from src.dataset import RecSysDataset
+from src.model import MFModel
+from src.client import Client
+from src.server import Server
 
 def main():
-    # --- 1. 设置和加载 ---
-    print("Using device:", CONFIG['device'])
-    
-    # 创建日志文件
+
+    # --- 1. 加载配置和设置标准日志系统 ---
+    log_level = CONFIG.get("log_level", "INFO").upper()
     log_dir = "logs"
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
-    log_file_path = os.path.join(log_dir, f"{CONFIG['defense_method']}_{time.strftime('%Y%m%d-%H%M%S')}.log")
+    os.makedirs(log_dir, exist_ok=True)
     
-    def log_message(message):
-        print(message)
-        with open(log_file_path, 'a') as f:
-            f.write(message + '\n')
+    defense_method_str = CONFIG.get('defense_method', 'fedavg')
+    log_file_name = f"{defense_method_str}_{log_level}_{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
+    log_file_path = os.path.join(log_dir, log_file_name)
+    
+    # 使用Python内置的logging模块，这是更标准、更强大的做法
+    logging.basicConfig(
+        level=log_level,
+        format='[%(asctime)s][%(levelname)s] %(message)s',
+        datefmt='%H:%M:%S',
+        handlers=[
+            logging.FileHandler(log_file_path),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    logger = logging.getLogger()
+    
+    logger.info(f"Using device: {CONFIG.get('device', 'cuda' if torch.cuda.is_available() else 'cpu')}")
+    logger.info(f"Configuration:\n{json.dumps(CONFIG, indent=4)}")
 
-    log_message("Configuration:\n" + str(CONFIG))
 
+    # --- 2. 准备数据、模型和客户端 ---
+    # 使用我们最新的RecSysDataset
+    logger.info("--- Creating Federated Data Partition ---")
+    try:
+        dataset = RecSysDataset(
+            data_path=CONFIG['data_path'],
+            min_interactions=CONFIG['min_interactions']
+        )
+        logger.info(f"Federated data created for {dataset.num_users} clients.")
+    except Exception as e:
+        logger.error(f"Failed to create dataset: {e}")
+        return # Exit if data fails
+    logger.info("--- Federated Data Partition Finished ---")
 
-    # --- 2. 加载数据 ---
-    # 注意：你的 data_loader.py 使用了 Path(__file__)，
-    # 所以请确保你的目录结构是:
-    # FedCSR_Project/
-    #  |- main.py
-    #  |- config.py
-    #  |- src/
-    #  |  |- data_loader.py
-    #  |  |- ...
-    #  |- data/
-    #  |  |- ml-1m/
-    #  |  |  - ratings.dat
-    processed_df, num_users, num_items = load_and_preprocess_movielens(CONFIG['min_interactions'])
-    train_data, test_data = create_federated_data(processed_df)
-
+    # 初始化全局模型
+    global_model = MFModel(
+        num_users=dataset.num_users,
+        num_items=dataset.num_items,
+        embedding_dim=CONFIG['embedding_dim']
+    )
+    
+ 
+    # ... (初始化全局模型之后)
 
     # --- 3. 初始化服务器 ---
-    # 服务器内部会根据config创建客户端
     server = Server(
-        config=CONFIG,
-        num_users=num_users,
-        num_items=num_items,
-        train_data=train_data,
-        test_data=test_data
+        model=global_model,
+        dataset=dataset,
+        config=CONFIG
     )
+    logger.info(f"Using {CONFIG.get('defense_method', 'fedavg').upper()} aggregation strategy.")
 
-    # --- 4. 联邦学习主循环 ---
-    log_message("--- Starting Federated Training ---")
-    for round_num in range(1, CONFIG['num_rounds'] + 1):
-        # 训练
-        server.train_round(round_num)
 
-        # 评估
-        if round_num % CONFIG['eval_every'] == 0:
+    # --- 4. 开始联邦训练循环 ---
+    logger.info("\n--- Starting Federated Training ---")
+    start_time = time.time()
+
+    # 获取所有客户端的ID列表
+    all_client_ids = list(range(dataset.num_users))
+    num_malicious = int(CONFIG['malicious_fraction'] * dataset.num_users)
+    if num_malicious > 0:
+        logger.info(f"Malicious clients are IDs 0-{num_malicious - 1}.")
+
+
+    for current_round in range(1, CONFIG['num_rounds'] + 1):
+        logger.info(f"\n--- Training Round {current_round}/{CONFIG['num_rounds']} ---")
+        
+        # 服务器选择客户端ID
+        selected_clients_indices = server.select_clients(all_client_ids)
+        logger.info(f"Selected {len(selected_clients_indices)} client IDs: {str(selected_clients_indices[:5])}...")
+
+        # [核心优化] 按需创建被选中的客户端对象
+        selected_clients = []
+        for client_id in selected_clients_indices:
+            is_malicious = client_id < num_malicious
+            # 为每个选中的客户端创建一个新的、独立的模型副本
+            client = Client(
+                client_id=client_id,
+                model=copy.deepcopy(global_model), # 关键：传递一个干净的模型副本
+                dataset=dataset,
+                config=CONFIG,
+                is_malicious=is_malicious
+            )
+            selected_clients.append(client)
+        
+        # 客户端并行（或串行）本地训练
+        client_updates = []
+        for client in selected_clients:
+            update = client.train()
+            if update is not None:
+                client_updates.append(update)
+        
+        # [内存清理] 显式删除本轮创建的客户端对象和更新，帮助垃圾回收
+        del selected_clients
+        if 'torch' in sys.modules and CONFIG.get('device') == 'cuda':
+            torch.cuda.empty_cache()
+
+        # 服务器聚合更新
+        # (注意：这里的 selected_clients_indices 是ID列表，与FedCSR的reputation系统兼容)
+        if client_updates:
+            aggregated_update = server.aggregate_updates(client_updates, selected_clients_indices)
+            
+            # 更新全局模型
+            if aggregated_update is not None:
+                 server.update_model(aggregated_update)
+            else:
+                logger.info("Aggregated update is None, skipping model update.")
+        else:
+            logger.warning("No client updates were generated in this round.")
+
+
+        # 定期评估
+        if current_round % CONFIG['eval_every'] == 0:
             recall, ndcg = server.evaluate()
-            log_message(f"Round {round_num}/{CONFIG['num_rounds']} | Recall@{CONFIG['eval_k']}: {recall:.4f}, NDCG@{CONFIG['eval_k']}: {ndcg:.4f}")
+            logger.info(f"EVALUATION | Round {current_round}/{CONFIG['num_rounds']} | Recall@{CONFIG['eval_k']}: {recall:.4f}, NDCG@{CONFIG['eval_k']}: {ndcg:.4f}")
 
-    log_message("--- Federated Training Finished ---")
+    end_time = time.time()
+    logger.info("\n--- Federated Training Finished ---")
+    logger.info(f"Total training time: {(end_time - start_time) / 60:.2f} minutes.")
+    logger.info(f"Log file saved to: {log_file_path}")
 
 
 if __name__ == '__main__':
-    # 确保你的 sklearn, pandas, torch, tqdm 已经安装
-    # pip install scikit-learn pandas torch tqdm
-    
-    # 请确认你的文件目录结构正确
-    # 如果 data_loader.py 报错找不到文件，请检查 main.py 所在的位置
-    # main.py 应该在项目的根目录
-    
     main()
+
