@@ -84,6 +84,7 @@ def main():
 
     # 获取所有客户端的ID列表
     all_client_ids = list(range(dataset.num_users))
+    num_clients_per_round = max(1, int(CONFIG['client_fraction'] * dataset.num_users))
     num_malicious = int(CONFIG['malicious_fraction'] * dataset.num_users)
     if num_malicious > 0:
         logger.info(f"Malicious clients are IDs 0-{num_malicious - 1}.")
@@ -93,7 +94,11 @@ def main():
         logger.info(f"\n--- Training Round {current_round}/{CONFIG['num_rounds']} ---")
         
         # 服务器选择客户端ID
-        selected_clients_indices = server.select_clients(all_client_ids)
+         # Modify this call to match the server's method signature
+        selected_clients_indices = server.select_clients(
+            all_client_ids=all_client_ids, 
+            num_clients_to_select=num_clients_per_round
+        )
         logger.info(f"Selected {len(selected_clients_indices)} client IDs: {str(selected_clients_indices[:5])}...")
 
         # [核心优化] 按需创建被选中的客户端对象

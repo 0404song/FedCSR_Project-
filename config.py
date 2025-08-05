@@ -24,8 +24,8 @@ CONFIG = {
     # =======================================================================
 
     # --- 1. 防御方法选择 ---
-    # 第一次运行设置为 'fedcsr'，第二次运行设置为 'fedavg'  fednorm  fedcsr_hardfilter
-    "defense_method": "fedcsr_directional",  #  <--- 先跑 'fedcsr'
+    # 第一次运行设置为 'fedcsr'，第二次运行设置为 'fedavg'  fednorm  fedcsr_hardfilter  fedcsr_pro fedrep
+    "defense_method": "fedrep",  #  <--- 先跑 'fedcsr'
 
     # --- 2. 攻击配置 (使用新的毁灭性攻击) ---
     "malicious_fraction": 0.3,          # 30%的恶意客户端，比例更高，更容易摧毁FedAvg
@@ -53,6 +53,11 @@ CONFIG = {
     "min_cluster_size_ratio": 0.05, # 保护成员数占本轮参与者5%以上的簇
     
     #"absolute_norm_cap": 100.0, # [新] 范数的绝对上限
+    
+    # --- Parameters for FedRep ---
+    'proxy_dataset_size': 500,     # Size of the golden dataset (reused)
+    'proxy_batch_size': 128,      # Can be larger for evaluation
+    'lambda_reputation': 0.95,     # Decay factor for historical reputation, higher means more memory
     
     "norm_clipping_percentile":90.0,
 

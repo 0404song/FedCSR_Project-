@@ -3,6 +3,8 @@
 import torch
 import numpy as np
 import logging
+import torch.nn as nn
+from copy import deepcopy
 from sklearn.cluster import MiniBatchKMeans
 
 class AggregatorBase:
@@ -233,3 +235,126 @@ class FedCSRDirectional(AggregatorBase):
 
         self.logger.info("Aggregation complete based on the main direction cluster.")
         return agg_update
+        
+        
+
+
+# ... FedAvgAggregator, FedNormAggregator, etc. ...
+
+class FedRepAggregator:
+    def __init__(self, config, logger, server_instance):
+        self.config = config
+        self.logger = logger
+        self.server = server_instance # Crucial link to access server's model and reputations
+        self.device = self.server.device
+        self.lambda_reputation = self.config.get('lambda_reputation', 0.95) # Decay factor for reputation
+
+    def _evaluate_update_on_proxy(self, client_update):
+        """
+        Temporarily applies a client's update to a copy of the global model 
+        and evaluates its impact on the proxy dataset.
+        Returns the change in loss (a smaller loss is better).
+        """
+        # Create a temporary model to test the update
+        temp_model = deepcopy(self.server.model)
+        temp_model.to(self.device)
+        
+        current_state = temp_model.state_dict()
+        for key in current_state:
+            current_state[key] += client_update[key].to(self.device)
+        temp_model.load_state_dict(current_state)
+        
+        # Evaluate this temp model on the proxy dataset
+        temp_model.eval()
+        total_loss = 0
+        loss_fn = nn.MSELoss()
+        with torch.no_grad():
+            for users, items, ratings in self.server.proxy_dataloader:
+                users, items = users.to(self.device), items.to(self.device)
+                ratings = ratings.to(self.device)
+                predictions = temp_model(users, items)
+                loss = loss_fn(predictions, ratings)
+                total_loss += loss.item()
+        
+        avg_loss = total_loss / len(self.server.proxy_dataloader)
+        # Clean up the copied model's memory
+        del temp_model
+        return avg_loss
+
+# In src/aggregators.py, inside the FedRepAggregator class
+
+    def aggregate(self, client_updates, selected_clients):
+        self.logger.info("--- [FedRep: Reputation-based Aggregation] ---")
+        
+        if not client_updates:
+            self.logger.warning("No client updates to aggregate.")
+            return None
+
+        # Step 1: Evaluate each client's contribution and update reputation
+        self.logger.info("Assessing client updates on proxy dataset...")
+        client_scores = {}
+        
+        # --- [FIX THIS LINE] ---
+        # The 'update' is the element itself now, not a sub-key.
+        # Get baseline loss of the current global model by creating a zero-update.
+        base_loss = self._evaluate_update_on_proxy(
+            {k: torch.zeros_like(v) for k, v in client_updates[0].items()}
+        )
+        # --- [END OF FIX] ---
+
+        self.logger.info(f"Current Global Model Loss on Proxy: {base_loss:.4f}")
+
+        # The loop now iterates over the index i
+        for i, client_id in enumerate(selected_clients):
+            # --- [FIX THIS LINE] ---
+            # Get the update from the list using the index 'i'
+            update = client_updates[i]
+            # --- [END OF FIX] ---
+            
+            # Calculate the loss after applying this client's update
+            client_loss = self._evaluate_update_on_proxy(update)
+            # Score is the improvement over baseline. Higher is better.
+            score = base_loss - client_loss 
+            client_scores[client_id] = score
+            
+            # Update reputation
+            self.server.client_reputations[client_id] = (
+                self.lambda_reputation * self.server.client_reputations[client_id] + 
+                (1 - self.lambda_reputation) * score
+            )
+            self.logger.debug(f"Client {client_id}: Score={score:.4f}, NewRep={self.server.client_reputations[client_id]:.4f}")
+
+        # Step 2: Perform Reputation-Weighted Aggregation
+        self.logger.info("Performing reputation-weighted aggregation...")
+        
+        # --- [FIX THIS LINE] ---
+        # Initialize the aggregated_update based on the structure of the first update
+        aggregated_update = {k: torch.zeros_like(v) for k, v in client_updates[0].items()}
+        # --- [END OF FIX] ---
+
+        total_reputation_weight = 0
+
+        # The loop now iterates over the index i
+        for i, client_id in enumerate(selected_clients):
+            reputation = self.server.client_reputations.get(client_id, 1.0)
+            weight = max(reputation, 0)
+            
+            # --- [FIX THIS LINE] ---
+            # Get the update from the list using the index 'i'
+            update = client_updates[i]
+            # --- [END OF FIX] ---
+
+            for key in aggregated_update:
+                aggregated_update[key] += update[key].to(self.device) * weight
+            
+            total_reputation_weight += weight
+
+        if total_reputation_weight > 0:
+            for key in aggregated_update:
+                aggregated_update[key] /= total_reputation_weight
+        
+        self.logger.info(f"Aggregation complete. Total reputation weight: {total_reputation_weight:.2f}")
+
+        return aggregated_update
+
+
