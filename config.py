@@ -62,6 +62,13 @@ CONFIG = {
     "norm_clipping_percentile":90.0,
 
     "lambda_reputation": 0.95,  # 信誉更新的遗忘因子 λ，0.95让声誉变化更平滑
+    
+    # --- Parameters for FedRep+ (Quarantine & Reboot) ---
+    'enable_quarantine': True,           # Master switch to enable/disable this feature
+    #'quarantine_trigger_threshold': 0.20, # Trigger if loss increases by more than 20%
+    'quarantine_score_threshold': -0.0001, # <-- NEW! Trigger if avg score of the round is below this value
+    'quarantine_elite_threshold': 0.20,    # Use top 20% reputation clients for recovery
+    'quarantine_duration': 2,              # Perform recovery for 2 rounds
 
     # =======================================================================
     #                       其他和评估配置

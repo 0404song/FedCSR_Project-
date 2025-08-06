@@ -20,7 +20,11 @@ class Server:
         self.logger = logging.getLogger(__name__)
         self.device = torch.device(self.config.get('device', 'cpu'))
         self.model.to(self.device)
-
+        # --- FedRep+ Quarantine State Management ---
+        self.last_global_loss = float('inf')  # Initialize with a very high loss
+        self.is_in_quarantine = False
+        self.quarantine_rounds_left = 0
+        self.enable_quarantine = self.config.get('enable_quarantine', False)
         # --- Client Reputation Management (Core of FedRep) ---
         # Initialize reputation for all clients. We have num_users from the dataset.
         self.client_reputations = {i: 1.0 for i in range(self.dataset.num_users)}
@@ -74,9 +78,9 @@ class Server:
         # This method remains unchanged, it just calls the aggregator
         return self.aggregator.aggregate(client_updates, selected_clients)
 
+# In src/server.py, RE-WRITE the update_model method as follows
+
     def update_model(self, aggregated_update):
-        # This method also remains unchanged. We are encapsulating all logic
-        # into the new aggregator, keeping the server clean.
         if aggregated_update is None:
             self.logger.info("Skipping model update as aggregated_update is None.")
             return
@@ -86,11 +90,40 @@ class Server:
             current_state[key] = current_state[key] + aggregated_update[key].to(self.device)
         self.model.load_state_dict(current_state)
         self.logger.info("Global model updated with aggregated weights.")
+
+        # --- [FedRep++ QUARANTINE COUNTDOWN LOGIC] ---
+        # The trigger is now in the aggregator. The server just counts down.
+        if self.is_in_quarantine:
+            self.quarantine_rounds_left -= 1
+            self.logger.warning(f"In quarantine recovery mode. {self.quarantine_rounds_left} rounds left.")
+            if self.quarantine_rounds_left <= 0:
+                self.is_in_quarantine = False
+                self.logger.info("Quarantine recovery finished. Resuming normal operation.")
+
+
+        
+        # In src/server.py, inside the Server class, ADD this new helper method
+
+    def _get_current_global_loss(self):
+        #"""Evaluates the current global model on the proxy dataset."""
+        if not self.proxy_dataloader:
+            return float('inf')
+        
+        self.model.eval()
+        total_loss = 0
+        loss_fn = torch.nn.MSELoss()
+        with torch.no_grad():
+            for users, items, ratings in self.proxy_dataloader:
+                users, items = users.to(self.device), items.to(self.device)
+                ratings = ratings.to(self.device)
+                predictions = self.model(users, items)
+                loss = loss_fn(predictions, ratings)
+                total_loss += loss.item()
+        
+        return total_loss / len(self.proxy_dataloader)
+
         
     def evaluate(self):
-        """
-        Evaluates the global model on the test dataset.
-        """
         self.model.eval()
         self.model.to(self.device)
 

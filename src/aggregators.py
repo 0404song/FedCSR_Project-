@@ -280,81 +280,119 @@ class FedRepAggregator:
         # Clean up the copied model's memory
         del temp_model
         return avg_loss
-
-# In src/aggregators.py, inside the FedRepAggregator class
+        
+# In src/aggregators.py, RE-WRITE the aggregate method completely
 
     def aggregate(self, client_updates, selected_clients):
-        self.logger.info("--- [FedRep: Reputation-based Aggregation] ---")
-        
         if not client_updates:
             self.logger.warning("No client updates to aggregate.")
             return None
 
-        # Step 1: Evaluate each client's contribution and update reputation
-        self.logger.info("Assessing client updates on proxy dataset...")
+        # --- UNIVERSAL ASSESSMENT STEP ---
+        # This step is now performed in every round, regardless of quarantine status.
+        self.logger.info("Assessing all client updates on proxy dataset...")
         client_scores = {}
-        
-        # --- [FIX THIS LINE] ---
-        # The 'update' is the element itself now, not a sub-key.
-        # Get baseline loss of the current global model by creating a zero-update.
         base_loss = self._evaluate_update_on_proxy(
             {k: torch.zeros_like(v) for k, v in client_updates[0].items()}
         )
-        # --- [END OF FIX] ---
-
         self.logger.info(f"Current Global Model Loss on Proxy: {base_loss:.4f}")
 
-        # The loop now iterates over the index i
+        total_score = 0
         for i, client_id in enumerate(selected_clients):
-            # --- [FIX THIS LINE] ---
-            # Get the update from the list using the index 'i'
             update = client_updates[i]
-            # --- [END OF FIX] ---
-            
-            # Calculate the loss after applying this client's update
             client_loss = self._evaluate_update_on_proxy(update)
-            # Score is the improvement over baseline. Higher is better.
             score = base_loss - client_loss 
             client_scores[client_id] = score
-            
-            # Update reputation
-            self.server.client_reputations[client_id] = (
-                self.lambda_reputation * self.server.client_reputations[client_id] + 
-                (1 - self.lambda_reputation) * score
-            )
-            self.logger.debug(f"Client {client_id}: Score={score:.4f}, NewRep={self.server.client_reputations[client_id]:.4f}")
-
-        # Step 2: Perform Reputation-Weighted Aggregation
-        self.logger.info("Performing reputation-weighted aggregation...")
+            total_score += score
         
-        # --- [FIX THIS LINE] ---
-        # Initialize the aggregated_update based on the structure of the first update
-        aggregated_update = {k: torch.zeros_like(v) for k, v in client_updates[0].items()}
-        # --- [END OF FIX] ---
+        avg_round_score = total_score / len(selected_clients) if selected_clients else 0
+        self.logger.info(f"Average score for this round: {avg_round_score:.6f}")
 
-        total_reputation_weight = 0
-
-        # The loop now iterates over the index i
-        for i, client_id in enumerate(selected_clients):
-            reputation = self.server.client_reputations.get(client_id, 1.0)
-            weight = max(reputation, 0)
-            
-            # --- [FIX THIS LINE] ---
-            # Get the update from the list using the index 'i'
-            update = client_updates[i]
-            # --- [END OF FIX] ---
-
-            for key in aggregated_update:
-                aggregated_update[key] += update[key].to(self.device) * weight
-            
-            total_reputation_weight += weight
-
-        if total_reputation_weight > 0:
-            for key in aggregated_update:
-                aggregated_update[key] /= total_reputation_weight
+        # --- HEALTH CHECK & AGGREGATION STRATEGY DECISION ---
+        is_under_attack = False
+        if self.config.get('enable_quarantine', False):
+            score_threshold = self.config.get('quarantine_score_threshold', -0.0001)
+            if avg_round_score < score_threshold:
+                is_under_attack = True
+                if not self.server.is_in_quarantine:
+                    self.logger.critical(
+                        f"HEALTH ALERT: Average round score is {avg_round_score:.6f}. Entering QUARANTINE!"
+                    )
+                    self.server.is_in_quarantine = True
+                    self.server.quarantine_rounds_left = self.config.get('quarantine_duration', 2)
         
-        self.logger.info(f"Aggregation complete. Total reputation weight: {total_reputation_weight:.2f}")
+        # --- PERFORM AGGREGATION ---
+        aggregated_update = None
+
+        if self.server.is_in_quarantine or is_under_attack:
+            # === QUARANTINE / EMERGENCY AGGREGATION ===
+            self.logger.warning("--- [Quarantine Protocol: Positive-Contribution-Only Aggregation] ---")
+            
+            positive_contributors = {cid: score for cid, score in client_scores.items() if score > 0}
+            
+            if not positive_contributors:
+                self.logger.warning("No positive contributors found. Skipping model update for safety.")
+                aggregated_update = None
+            else:
+                self.logger.info(f"Found {len(positive_contributors)} positive contributors. Aggregating their updates.")
+                positive_contrib_ids = list(positive_contributors.keys())
+                
+                positive_updates = []
+                original_indices = {client_id: i for i, client_id in enumerate(selected_clients)}
+                for contrib_id in positive_contrib_ids:
+                    if contrib_id in original_indices:
+                        positive_updates.append(client_updates[original_indices[contrib_id]])
+                
+                # Simple average of the good updates
+                agg_update_temp = {k: torch.zeros_like(v) for k, v in positive_updates[0].items()}
+                for update in positive_updates:
+                    for key in agg_update_temp:
+                        agg_update_temp[key] += update[key].to(self.device)
+                
+                for key in agg_update_temp:
+                    agg_update_temp[key] /= len(positive_updates)
+                aggregated_update = agg_update_temp
+            
+            # CRUCIAL: Do NOT update reputations during quarantine.
+            self.logger.warning("Reputation updates are frozen during quarantine.")
+
+        else:
+            # === NORMAL OPERATION AGGREGATION ===
+            self.logger.info("--- [Standard Reputation-Weighted Aggregation] ---")
+            
+            agg_update_temp = {k: torch.zeros_like(v) for k, v in client_updates[0].items()}
+            total_reputation_weight = 0
+
+            for i, client_id in enumerate(selected_clients):
+                # Update reputation using the pre-calculated score
+                score = client_scores[client_id]
+                self.server.client_reputations[client_id] = (
+                    self.lambda_reputation * self.server.client_reputations[client_id] + 
+                    (1 - self.lambda_reputation) * score
+                )
+                self.logger.debug(f"Client {client_id}: Score={score:.4f}, NewRep={self.server.client_reputations[client_id]:.4f}")
+
+                # Perform weighted aggregation
+                reputation = self.server.client_reputations.get(client_id, 1.0)
+                weight = max(reputation, 0)
+                
+                update = client_updates[i]
+                for key in agg_update_temp:
+                    agg_update_temp[key] += update[key].to(self.device) * weight
+                
+                total_reputation_weight += weight
+
+            if total_reputation_weight > 0:
+                for key in agg_update_temp:
+                    agg_update_temp[key] /= total_reputation_weight
+            
+            aggregated_update = agg_update_temp
+            self.logger.info(f"Aggregation complete. Total reputation weight: {total_reputation_weight:.2f}")
 
         return aggregated_update
+
+
+
+
 
 
